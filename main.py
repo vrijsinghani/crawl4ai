@@ -4,7 +4,7 @@ from fastapi.responses import JSONResponse
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.cors import CORSMiddleware  
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.templating import Jinja2Templates
 from fastapi.exceptions import RequestValidationError
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -14,7 +14,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi import Depends, Security
 
 from pydantic import BaseModel, HttpUrl, Field
-from typing import Optional, List, Dict, Any, Union
+from typing import Optional, List, Dict, Any, Union, Set
 import psutil
 import time
 import uuid
@@ -77,7 +77,7 @@ class CrawlRequest(BaseModel):
     session_id: Optional[str] = None
     cache_mode: Optional[CacheMode] = CacheMode.ENABLED
     priority: int = Field(default=5, ge=1, le=10)
-    ttl: Optional[int] = 3600    
+    ttl: Optional[int] = 3600
     crawler_params: Dict[str, Any] = {}
 
 @dataclass
@@ -258,10 +258,10 @@ class CrawlerService:
     async def submit_task(self, request: CrawlRequest) -> str:
         task_id = str(uuid.uuid4())
         await self.task_manager.add_task(task_id, request.priority, request.ttl or 3600)
-        
+
         # Store request data with task
         self.task_manager.tasks[task_id].request = request
-        
+
         return task_id
 
     async def _process_queue(self):
@@ -286,9 +286,9 @@ class CrawlerService:
 
                 try:
                     crawler = await self.crawler_pool.acquire(**request.crawler_params)
-                    
+
                     extraction_strategy = self._create_extraction_strategy(request.extraction_config)
-                    
+
                     if isinstance(request.urls, list):
                         results = await crawler.arun_many(
                             urls=[str(url) for url in request.urls],
@@ -410,24 +410,24 @@ async def get_task_status(task_id: str):
 @app.post("/crawl_sync", dependencies=[Depends(verify_token)])
 async def crawl_sync(request: CrawlRequest) -> Dict[str, Any]:
     task_id = await crawler_service.submit_task(request)
-    
+
     # Wait up to 60 seconds for task completion
     for _ in range(60):
         task_info = crawler_service.task_manager.get_task(task_id)
         if not task_info:
             raise HTTPException(status_code=404, detail="Task not found")
-            
+
         if task_info.status == TaskStatus.COMPLETED:
             # Return same format as /task/{task_id} endpoint
             if isinstance(task_info.result, list):
                 return {"status": task_info.status, "results": [result.dict() for result in task_info.result]}
             return {"status": task_info.status, "result": task_info.result.dict()}
-            
+
         if task_info.status == TaskStatus.FAILED:
             raise HTTPException(status_code=500, detail=task_info.error)
-            
+
         await asyncio.sleep(1)
-    
+
     # If we get here, task didn't complete within timeout
     raise HTTPException(status_code=408, detail="Task timed out")
 
@@ -436,7 +436,7 @@ async def crawl_direct(request: CrawlRequest) -> Dict[str, Any]:
     try:
         crawler = await crawler_service.crawler_pool.acquire(**request.crawler_params)
         extraction_strategy = crawler_service._create_extraction_strategy(request.extraction_config)
-        
+
         try:
             if isinstance(request.urls, list):
                 results = await crawler.arun_many(
@@ -471,7 +471,25 @@ async def crawl_direct(request: CrawlRequest) -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"Error in direct crawl: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+class MultiCrawlRequest(BaseModel):
+    urls: List[HttpUrl]
+    config: Union[Dict, None] = None
     
+@app.post("/crawl-many", dependencies=[Depends(verify_token)])
+async def crawl_many_endpoint(request: MultiCrawlRequest):
+    """Endpoint to crawl and process multiple URLs."""
+    try:
+        browser_config = BrowserConfig()
+        config_params = request.config or {}  # Use default config if none provided
+        crawler_config = CrawlerRunConfig.from_kwargs(config_params)
+
+        async with AsyncWebCrawler(config=browser_config) as crawler:
+             results = await crawler.arun_many(urls=[str(url) for url in request.urls], config=crawler_config)
+             return results
+    except Exception as e:
+       raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/health")
 async def health_check():
     available_slots = await crawler_service.resource_monitor.get_available_slots()
@@ -482,6 +500,123 @@ async def health_check():
         "memory_usage": memory.percent,
         "cpu_usage": psutil.cpu_percent(),
     }
+
+
+class SpiderRequest(BaseModel):
+    url: HttpUrl
+    max_depth: int = Field(default=3, ge=1, le=10)
+    max_pages: int = Field(default=100, ge=1, le=1000)
+    batch_size: int = Field(default=10, ge=1, le=50)
+    include_patterns: Optional[List[str]] = None
+    exclude_patterns: Optional[List[str]] = None
+    extraction_config: Optional[ExtractionConfig] = None
+    crawler_params: Dict[str, Any] = {}
+
+class SpiderProgress(BaseModel):
+    crawled_urls: Set[str] = Field(default_factory=set)
+    pending_urls: Set[str] = Field(default_factory=set)
+    failed_urls: Dict[str, str] = Field(default_factory=dict)
+    results: Dict[str, CrawlResult] = Field(default_factory=dict)
+    current_depth: int = 0
+    
+    class Config:
+        arbitrary_types_allowed = True
+
+@app.post("/spider", dependencies=[Depends(verify_token)])
+async def spider_crawl(request: SpiderRequest) -> Dict[str, Any]:
+    base_domain = urlparse(str(request.url)).netloc
+    progress = SpiderProgress(
+        pending_urls={str(request.url)},
+        current_depth=0
+    )
+    
+    def is_valid_internal_link(url: str) -> bool:
+        if not url:
+            return False
+        parsed = urlparse(url)
+        if not parsed.netloc:
+            return True
+        return parsed.netloc == base_domain
+    
+    def should_crawl_url(url: str) -> bool:
+        # Skip if already crawled or pending
+        if url in progress.crawled_urls or url in progress.pending_urls:
+            return False
+            
+        # Check include/exclude patterns
+        if request.include_patterns:
+            if not any(pattern in url for pattern in request.include_patterns):
+                return False
+                
+        if request.exclude_patterns:
+            if any(pattern in url for pattern in request.exclude_patterns):
+                return False
+                
+        return True
+
+    crawler = await crawler_service.crawler_pool.acquire(**request.crawler_params)
+    try:
+        while (
+            progress.pending_urls 
+            and len(progress.crawled_urls) < request.max_pages 
+            and progress.current_depth < request.max_depth
+        ):
+            # Take batch_size URLs from pending
+            batch_urls = set(list(progress.pending_urls)[:request.batch_size])
+            progress.pending_urls -= batch_urls
+            
+            # Crawl batch
+            try:
+                results = await crawler.arun_many(
+                    urls=list(batch_urls),
+                    extraction_strategy=crawler_service._create_extraction_strategy(request.extraction_config),
+                    **request.crawler_params
+                )
+                
+                # Process results
+                for result in results:
+                    if not result.success:
+                        progress.failed_urls[result.url] = result.error_message
+                        continue
+                        
+                    progress.crawled_urls.add(result.url)
+                    progress.results[result.url] = result
+                    
+                    # Extract new internal links
+                    if result.links:
+                        internal_links = {
+                            link.get("href") 
+                            for link in result.links.get("internal", [])
+                            if link.get("href")
+                        }
+                        
+                        # Add valid new links to pending
+                        new_links = {
+                            url for url in internal_links 
+                            if is_valid_internal_link(url) and should_crawl_url(url)
+                        }
+                        progress.pending_urls.update(new_links)
+                        
+            except Exception as e:
+                logger.error(f"Batch crawl error: {str(e)}")
+                for url in batch_urls:
+                    progress.failed_urls[url] = str(e)
+            
+            progress.current_depth += 1
+            
+        return {
+            "crawled_count": len(progress.crawled_urls),
+            "failed_count": len(progress.failed_urls),
+            "max_depth_reached": progress.current_depth,
+            "results": {
+                url: result.dict() 
+                for url, result in progress.results.items()
+            },
+            "failed_urls": progress.failed_urls
+        }
+        
+    finally:
+        await crawler_service.crawler_pool.release(crawler)
 
 if __name__ == "__main__":
     import uvicorn
