@@ -499,16 +499,14 @@ class SpiderRequest(BaseModel):
     extraction_config: Optional[ExtractionConfig] = None
     crawler_params: Dict[str, Any] = {}
 
-class SpiderProgress(BaseModel):
-    crawled_urls: Set[str] = Field(default_factory=set)
-    pending_urls: Set[str] = Field(default_factory=set)
+
 class SpiderProgress(BaseModel):
     crawled_urls: Set[str] = Field(default_factory=set)
     pending_urls: Dict[int, Set[str]] = Field(default_factory=lambda: defaultdict(set))
     failed_urls: Dict[str, str] = Field(default_factory=dict)
     results: Dict[str, CrawlResult] = Field(default_factory=dict)
     current_depth: int = 0
-
+    
     class Config:
         arbitrary_types_allowed = True
 
@@ -518,6 +516,7 @@ async def spider_crawl(request: SpiderRequest) -> Dict[str, Any]:
     progress = SpiderProgress()
     # Initialize with start URL at depth 0
     progress.pending_urls[0].add(str(request.url))
+    
     def is_valid_internal_link(url: str) -> bool:
         if not url:
             return False
@@ -525,91 +524,91 @@ async def spider_crawl(request: SpiderRequest) -> Dict[str, Any]:
         if not parsed.netloc:
             return True
         return parsed.netloc == base_domain
-
+    
     def should_crawl_url(url: str) -> bool:
         # Skip if already crawled or pending at any depth
         if url in progress.crawled_urls or any(url in urls for urls in progress.pending_urls.values()):
             return False
-
+            
         # Check include/exclude patterns
         if request.include_patterns:
             if not any(pattern in url for pattern in request.include_patterns):
                 return False
-
+                
         if request.exclude_patterns:
             if any(pattern in url for pattern in request.exclude_patterns):
                 return False
-
+                
         return True
 
     crawler = await crawler_service.crawler_pool.acquire(**request.crawler_params)
     try:
         # Continue while we have URLs at current depth and haven't exceeded limits
         while (
-            progress.current_depth < request.max_depth
-            and len(progress.crawled_urls) < request.max_pages
+            progress.current_depth < request.max_depth 
+            and len(progress.crawled_urls) < request.max_pages 
             and progress.pending_urls[progress.current_depth]
         ):
             current_depth_urls = progress.pending_urls[progress.current_depth]
-
+            
             while current_depth_urls and len(progress.crawled_urls) < request.max_pages:
                 # Take batch_size URLs from current depth
                 batch_urls = set(list(current_depth_urls)[:request.batch_size])
                 current_depth_urls -= batch_urls
-
+                
                 try:
-                results = await crawler.arun_many(
-                    urls=list(batch_urls),
-                    extraction_strategy=crawler_service._create_extraction_strategy(request.extraction_config),
-                    **request.crawler_params
-                )
-
-                # Process results
-                for result in results:
-                    if not result.success:
-                        progress.failed_urls[result.url] = result.error_message
-                        continue
-
-                    progress.crawled_urls.add(result.url)
-                    progress.results[result.url] = result
-
+                    results = await crawler.arun_many(
+                        urls=list(batch_urls),
+                        extraction_strategy=crawler_service._create_extraction_strategy(request.extraction_config),
+                        **request.crawler_params
+                    )
+                    
+                    # Process results
+                    for result in results:
+                        if not result.success:
+                            progress.failed_urls[result.url] = result.error_message
+                            continue
+                            
+                        progress.crawled_urls.add(result.url)
+                        progress.results[result.url] = result
+                        
                         # Only queue new URLs if we haven't reached max depth
                         if progress.current_depth < request.max_depth - 1:
-                    # Extract new internal links
-                    if result.links:
-                        internal_links = {
-                            link.get("href")
-                            for link in result.links.get("internal", [])
-                            if link.get("href")
-                        }
-
+                            # Extract new internal links
+                            if result.links:
+                                internal_links = {
+                                    link.get("href") 
+                                    for link in result.links.get("internal", [])
+                                    if link.get("href")
+                                }
+                                
                                 # Add valid new links to next depth level
-                        new_links = {
-                            url for url in internal_links
-                            if is_valid_internal_link(url) and should_crawl_url(url)
-                        }
+                                new_links = {
+                                    url for url in internal_links 
+                                    if is_valid_internal_link(url) and should_crawl_url(url)
+                                }
                                 progress.pending_urls[progress.current_depth + 1].update(new_links)
-
-            except Exception as e:
-                logger.error(f"Batch crawl error: {str(e)}")
-                for url in batch_urls:
-                    progress.failed_urls[url] = str(e)
-
+                            
+                except Exception as e:
+                    logger.error(f"Batch crawl error: {str(e)}")
+                    for url in batch_urls:
+                        progress.failed_urls[url] = str(e)
+            
             # Move to next depth when current depth is exhausted
             if not current_depth_urls:
                 progress.current_depth += 1
-
+            
         return {
             "crawled_count": len(progress.crawled_urls),
             "failed_count": len(progress.failed_urls),
             "max_depth_reached": progress.current_depth,
             "results": {
-                url: result.dict()
+                url: result.dict() 
                 for url, result in progress.results.items()
             },
             "failed_urls": progress.failed_urls
         }
-
+        
     finally:
         await crawler_service.crawler_pool.release(crawler)
 
