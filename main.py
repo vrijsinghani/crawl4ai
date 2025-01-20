@@ -515,11 +515,6 @@ class SpiderProgress(BaseModel):
 @app.post("/spider", dependencies=[Depends(verify_token)])
 async def spider_crawl(request: SpiderRequest) -> Dict[str, Any]:
     base_domain = urlparse(str(request.url)).netloc
-    progress = SpiderProgress(
-        pending_urls={str(request.url)},
-        current_depth=0
-    )
-
     progress = SpiderProgress()
     # Initialize with start URL at depth 0
     progress.pending_urls[0].add(str(request.url))
@@ -532,8 +527,6 @@ async def spider_crawl(request: SpiderRequest) -> Dict[str, Any]:
         return parsed.netloc == base_domain
 
     def should_crawl_url(url: str) -> bool:
-        # Skip if already crawled or pending
-        if url in progress.crawled_urls or url in progress.pending_urls:
         # Skip if already crawled or pending at any depth
         if url in progress.crawled_urls or any(url in urls for urls in progress.pending_urls.values()):
             return False
@@ -553,19 +546,12 @@ async def spider_crawl(request: SpiderRequest) -> Dict[str, Any]:
     try:
         # Continue while we have URLs at current depth and haven't exceeded limits
         while (
-            progress.pending_urls
             progress.current_depth < request.max_depth
             and len(progress.crawled_urls) < request.max_pages
-            and progress.current_depth < request.max_depth
             and progress.pending_urls[progress.current_depth]
         ):
-            # Take batch_size URLs from pending
-            batch_urls = set(list(progress.pending_urls)[:request.batch_size])
-            progress.pending_urls -= batch_urls
             current_depth_urls = progress.pending_urls[progress.current_depth]
 
-            # Crawl batch
-            try:
             while current_depth_urls and len(progress.crawled_urls) < request.max_pages:
                 # Take batch_size URLs from current depth
                 batch_urls = set(list(current_depth_urls)[:request.batch_size])
@@ -597,13 +583,11 @@ async def spider_crawl(request: SpiderRequest) -> Dict[str, Any]:
                             if link.get("href")
                         }
 
-                        # Add valid new links to pending
                                 # Add valid new links to next depth level
                         new_links = {
                             url for url in internal_links
                             if is_valid_internal_link(url) and should_crawl_url(url)
                         }
-                        progress.pending_urls.update(new_links)
                                 progress.pending_urls[progress.current_depth + 1].update(new_links)
 
             except Exception as e:
@@ -611,7 +595,6 @@ async def spider_crawl(request: SpiderRequest) -> Dict[str, Any]:
                 for url in batch_urls:
                     progress.failed_urls[url] = str(e)
 
-            progress.current_depth += 1
             # Move to next depth when current depth is exhausted
             if not current_depth_urls:
                 progress.current_depth += 1
