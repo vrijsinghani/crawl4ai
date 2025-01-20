@@ -26,12 +26,16 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DEFAULT_TIMEOUT=100 \
     DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies
+# Update apt keys and install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    gnupg \
+    wget \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-key adv --refresh-keys --keyserver keyserver.ubuntu.com \
+    && apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
-    wget \
-    gnupg \
     git \
     cmake \
     pkg-config \
@@ -64,7 +68,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libasound2 \
     libatspi2.0-0 \
     && rm -rf /var/lib/apt/lists/*
-
+    
 # GPU support if enabled and architecture is supported
 RUN if [ "$ENABLE_GPU" = "true" ] && [ "$TARGETPLATFORM" = "linux/amd64" ] ; then \
     apt-get update && apt-get install -y --no-install-recommends \
