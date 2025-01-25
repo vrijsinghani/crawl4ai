@@ -19,7 +19,7 @@ import psutil
 import time
 import uuid
 from collections import defaultdict
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 import math
 import logging
 from enum import Enum
@@ -526,8 +526,11 @@ async def spider_crawl(request: SpiderRequest) -> Dict[str, Any]:
         return parsed.netloc == base_domain
     
     def should_crawl_url(url: str) -> bool:
+        # Normalize URL by removing fragment
+        normalized_url = urlparse(url)._replace(fragment="").geturl()
+        
         # Skip if already crawled or pending at any depth
-        if url in progress.crawled_urls or any(url in urls for urls in progress.pending_urls.values()):
+        if normalized_url in progress.crawled_urls or any(normalized_url in {urlparse(u)._replace(fragment="").geturl() for u in urls} for urls in progress.pending_urls.values()):
             return False
             
         # Check include/exclude patterns
@@ -577,7 +580,7 @@ async def spider_crawl(request: SpiderRequest) -> Dict[str, Any]:
                             # Extract new internal links
                             if result.links:
                                 internal_links = {
-                                    link.get("href") 
+                                    urljoin(result.url, link.get("href"))
                                     for link in result.links.get("internal", [])
                                     if link.get("href")
                                 }

@@ -128,7 +128,7 @@ async def test_spider(base_url: str, output_dir: str = "spider_results"):
 def main():
     # Example URLs to test with
     test_urls = [
-        "https://fastapi.tiangolo.com/",  # FastAPI docs - good for testing
+        "https://neuralami.com/",  # FastAPI docs - good for testing
         # "https://python.org",           # Python.org - medium size
         # "https://httpbin.org",          # Simple test site
     ]

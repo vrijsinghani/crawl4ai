@@ -215,3 +215,4 @@ todo_executor.md
 protect-all-except-feature.sh
 manage-collab.sh
 publish.sh
+spider_results/
